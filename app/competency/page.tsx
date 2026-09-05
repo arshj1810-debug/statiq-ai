@@ -13,6 +13,22 @@ type Competency = {
   gap: number;
 };
 
+type QuizResult = {
+  score: number;
+  totalQuestions?: number;
+  total?: number;
+  percentage: number;
+  completedAt: string;
+  skillResults: Record<
+    string,
+    {
+      correct: number;
+      total: number;
+      percentage: number;
+    }
+  >;
+};
+
 export default function CompetencyPage() {
   const [competencies, setCompetencies] = useState<Competency[]>([]);
   const [loading, setLoading] = useState(true);
@@ -20,14 +36,78 @@ export default function CompetencyPage() {
   useEffect(() => {
     async function fetchCompetency() {
       try {
+        // Get base competency data
         const response = await fetch("/api/competency");
+
+        if (!response.ok) {
+          throw new Error("Failed to load competency data.");
+        }
+
         const result = await response.json();
 
-        if (result.success && Array.isArray(result.data)) {
-          setCompetencies(result.data);
+        if (!result.success || !Array.isArray(result.data)) {
+          throw new Error("Failed to load competency data.");
         }
+
+        let updatedCompetencies: Competency[] = result.data;
+
+        // Get latest quiz result from browser storage
+        // This matches the key used in your quiz page
+        const savedQuizResult = localStorage.getItem(
+          "statiqAI_assessment_result"
+        );
+
+        if (savedQuizResult) {
+          try {
+            const quizResult: QuizResult =
+              JSON.parse(savedQuizResult);
+
+            // Update competency levels using quiz performance
+            updatedCompetencies = result.data.map(
+              (skill: Competency) => {
+                const quizSkill =
+                  quizResult.skillResults?.[skill.name];
+
+                // If this skill was not included in the quiz,
+                // keep the original competency value
+                if (!quizSkill) {
+                  return skill;
+                }
+
+                const updatedCurrentLevel =
+                  quizSkill.percentage;
+
+                const updatedGap = Math.max(
+                  0,
+                  skill.targetLevel - updatedCurrentLevel
+                );
+
+                return {
+                  ...skill,
+                  currentLevel: updatedCurrentLevel,
+                  gap: updatedGap,
+                };
+              }
+            );
+
+            console.log(
+              "Competency updated using quiz results:",
+              updatedCompetencies
+            );
+          } catch (error) {
+            console.error(
+              "Failed to read saved quiz result:",
+              error
+            );
+          }
+        }
+
+        setCompetencies(updatedCompetencies);
       } catch (error) {
-        console.error("Failed to fetch competency data:", error);
+        console.error(
+          "Failed to fetch competency data:",
+          error
+        );
       } finally {
         setLoading(false);
       }
@@ -41,7 +121,8 @@ export default function CompetencyPage() {
     competencies.length > 0
       ? Math.round(
           competencies.reduce(
-            (total, skill) => total + skill.currentLevel,
+            (total, skill) =>
+              total + skill.currentLevel,
             0
           ) / competencies.length
         )
@@ -50,18 +131,23 @@ export default function CompetencyPage() {
   // Find Strongest Competency
   const strongestSkill =
     competencies.length > 0
-      ? competencies.reduce((strongest, current) =>
-          current.currentLevel > strongest.currentLevel
-            ? current
-            : strongest
+      ? competencies.reduce(
+          (strongest, current) =>
+            current.currentLevel >
+            strongest.currentLevel
+              ? current
+              : strongest
         )
       : null;
 
   // Find Priority Development Area
   const prioritySkill =
     competencies.length > 0
-      ? competencies.reduce((largestGap, current) =>
-          current.gap > largestGap.gap ? current : largestGap
+      ? competencies.reduce(
+          (largestGap, current) =>
+            current.gap > largestGap.gap
+              ? current
+              : largestGap
         )
       : null;
 
@@ -78,7 +164,10 @@ export default function CompetencyPage() {
 
             <div>
               <h1 className="text-xl font-bold text-slate-900">
-                Statiq<span className="text-blue-600">AI</span>
+                Statiq
+                <span className="text-blue-600">
+                  AI
+                </span>
               </h1>
 
               <p className="text-xs text-slate-500">
@@ -163,7 +252,6 @@ export default function CompetencyPage() {
         <div className="p-6 md:p-10">
           {/* Top Section */}
           <div className="grid gap-8 xl:grid-cols-3">
-
             {/* Overall Competency Score */}
             <div className="rounded-2xl border border-slate-200 bg-white p-7 shadow-sm">
               <p className="text-sm font-medium text-slate-500">
@@ -173,7 +261,9 @@ export default function CompetencyPage() {
               <div className="mt-8 flex justify-center">
                 <div className="flex h-44 w-44 flex-col items-center justify-center rounded-full border-[14px] border-blue-600">
                   <span className="text-5xl font-bold text-slate-900">
-                    {loading ? "..." : `${overallScore}%`}
+                    {loading
+                      ? "..."
+                      : `${overallScore}%`}
                   </span>
 
                   <span className="mt-1 text-sm text-slate-500">
@@ -243,7 +333,8 @@ export default function CompetencyPage() {
                           </span>
 
                           <span className="text-slate-400">
-                            {" "} / {skill.targetLevel}%
+                            {" / "}
+                            {skill.targetLevel}%
                           </span>
                         </div>
                       </div>
@@ -251,15 +342,26 @@ export default function CompetencyPage() {
                       {/* Current Level */}
                       <div className="mt-3">
                         <div className="mb-1 flex justify-between text-xs text-slate-500">
-                          <span>Current Level</span>
-                          <span>{skill.currentLevel}%</span>
+                          <span>
+                            Current Level
+                          </span>
+
+                          <span>
+                            {skill.currentLevel}%
+                          </span>
                         </div>
 
                         <div className="h-3 overflow-hidden rounded-full bg-slate-100">
                           <div
                             className="h-3 rounded-full bg-blue-600 transition-all duration-500"
                             style={{
-                              width: `${skill.currentLevel}%`,
+                              width: `${Math.min(
+                                100,
+                                Math.max(
+                                  0,
+                                  skill.currentLevel
+                                )
+                              )}%`,
                             }}
                           />
                         </div>
@@ -268,15 +370,26 @@ export default function CompetencyPage() {
                       {/* Target Level */}
                       <div className="mt-3">
                         <div className="mb-1 flex justify-between text-xs text-slate-500">
-                          <span>Target Level</span>
-                          <span>{skill.targetLevel}%</span>
+                          <span>
+                            Target Level
+                          </span>
+
+                          <span>
+                            {skill.targetLevel}%
+                          </span>
                         </div>
 
                         <div className="h-3 overflow-hidden rounded-full bg-slate-100">
                           <div
                             className="h-3 rounded-full bg-slate-400"
                             style={{
-                              width: `${skill.targetLevel}%`,
+                              width: `${Math.min(
+                                100,
+                                Math.max(
+                                  0,
+                                  skill.targetLevel
+                                )
+                              )}%`,
                             }}
                           />
                         </div>
@@ -301,7 +414,6 @@ export default function CompetencyPage() {
 
           {/* Bottom Cards */}
           <div className="mt-8 grid gap-6 md:grid-cols-3">
-
             {/* Strongest Competency */}
             <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
               <p className="text-sm text-slate-500">
@@ -357,7 +469,6 @@ export default function CompetencyPage() {
                 View AI Analysis →
               </Link>
             </div>
-
           </div>
         </div>
       </section>

@@ -12,6 +12,26 @@ type Question = {
   correctAnswer: string;
 };
 
+type SkillResult = {
+  correct: number;
+  total: number;
+  percentage: number;
+};
+
+type QuizGenerateResponse = {
+  success?: boolean;
+  message?: string;
+  error?: string;
+  data?: Question[];
+  extractedCharacters?: number;
+};
+
+type CompetencyResponse = {
+  success?: boolean;
+  message?: string;
+  error?: string;
+};
+
 export default function QuizPage() {
   const [file, setFile] = useState<File | null>(null);
   const [questions, setQuestions] = useState<Question[]>([]);
@@ -80,13 +100,7 @@ export default function QuizPage() {
         );
       }
 
-      let result: {
-        success?: boolean;
-        message?: string;
-        error?: string;
-        data?: Question[];
-        extractedCharacters?: number;
-      };
+      let result: QuizGenerateResponse;
 
       try {
         result = JSON.parse(responseText);
@@ -94,7 +108,7 @@ export default function QuizPage() {
         console.error("Invalid server response:", responseText);
 
         throw new Error(
-          "Server returned an invalid response. Check the terminal running npm run dev."
+          `Server returned an invalid response. Status: ${response.status}. Check the terminal running npm run dev.`
         );
       }
 
@@ -112,11 +126,38 @@ export default function QuizPage() {
         );
       }
 
-      setQuestions(result.data);
+      const validQuestions: Question[] = result.data.map(
+        (question, index) => ({
+          id:
+            typeof question.id === "number" && Number.isFinite(question.id)
+              ? question.id
+              : index + 1,
+          skill: question.skill || "General",
+          question: question.question,
+          options: Array.isArray(question.options)
+            ? question.options
+            : [],
+          correctAnswer: question.correctAnswer,
+        })
+      );
 
+      const invalidQuestion = validQuestions.some(
+        (question) =>
+          !question.question ||
+          question.options.length < 2 ||
+          !question.correctAnswer
+      );
+
+      if (invalidQuestion) {
+        throw new Error(
+          "The AI generated an incomplete quiz. Please try generating the quiz again."
+        );
+      }
+
+      setQuestions(validQuestions);
       setExtractedCharacters(result.extractedCharacters ?? 0);
 
-      console.log("Generated questions:", result.data);
+      console.log("Generated questions:", validQuestions);
     } catch (error) {
       console.error("Quiz generation error:", error);
 
@@ -137,10 +178,16 @@ export default function QuizPage() {
       ...previous,
       [questionId]: answer,
     }));
+
+    setError("");
   }
 
-  // Submit quiz and save overall + skill-wise results
   async function handleSubmitQuiz() {
+    if (questions.length === 0) {
+      setError("No quiz questions are available.");
+      return;
+    }
+
     if (Object.keys(answers).length < questions.length) {
       setError("Please answer all questions before submitting.");
       return;
@@ -162,14 +209,7 @@ export default function QuizPage() {
       );
 
       // Group questions by skill
-      const skillResults: Record<
-        string,
-        {
-          correct: number;
-          total: number;
-          percentage: number;
-        }
-      > = {};
+      const skillResults: Record<string, SkillResult> = {};
 
       questions.forEach((question) => {
         const skill = question.skill || "General";
@@ -220,11 +260,36 @@ export default function QuizPage() {
         }),
       });
 
-      const result = await response.json();
+      const responseText = await response.text();
+
+      console.log("Competency API response:", responseText);
+
+      if (!responseText.trim()) {
+        throw new Error(
+          `Server returned an empty response while saving the assessment. Status: ${response.status}`
+        );
+      }
+
+      let result: CompetencyResponse;
+
+      try {
+        result = JSON.parse(responseText);
+      } catch {
+        console.error(
+          "Invalid competency server response:",
+          responseText
+        );
+
+        throw new Error(
+          "Server returned an invalid response while saving the assessment."
+        );
+      }
 
       if (!response.ok || !result.success) {
         throw new Error(
-          result.message || "Failed to save quiz result."
+          result.error ||
+            result.message ||
+            "Failed to save quiz result."
         );
       }
 
@@ -233,13 +298,26 @@ export default function QuizPage() {
         result
       );
 
-      // Save detailed assessment result locally
-      const assessmentResult = {
+      // Create quiz result for competency system
+      const latestQuizResult = {
         score: calculatedScore,
-        totalQuestions: questions.length,
+        total: questions.length,
         percentage: calculatedPercentage,
         completedAt: new Date().toISOString(),
         skillResults,
+      };
+
+      // Save latest quiz result for the whole StatiqAI app
+      localStorage.setItem(
+        "latestQuizResult",
+        JSON.stringify(latestQuizResult)
+      );
+
+      // Save detailed assessment result
+      const assessmentResult = {
+        ...latestQuizResult,
+
+        totalQuestions: questions.length,
 
         questions: questions.map((question) => ({
           id: question.id,
@@ -255,6 +333,11 @@ export default function QuizPage() {
       localStorage.setItem(
         "statiqAI_assessment_result",
         JSON.stringify(assessmentResult)
+      );
+
+      console.log(
+        "Latest quiz result saved:",
+        latestQuizResult
       );
 
       console.log(
@@ -520,7 +603,8 @@ export default function QuizPage() {
                     <div className="mt-5 space-y-3">
                       {question.options.map((option) => (
                         <button
-                          key={option}
+                          key={`${question.id}-${option}`}
+                          type="button"
                           onClick={() =>
                             handleAnswer(question.id, option)
                           }
@@ -546,6 +630,7 @@ export default function QuizPage() {
               )}
 
               <button
+                type="button"
                 onClick={handleSubmitQuiz}
                 disabled={loading}
                 className="mt-8 w-full rounded-xl bg-blue-600 px-6 py-4 font-semibold text-white transition hover:bg-blue-700 disabled:cursor-not-allowed disabled:bg-slate-300"
@@ -700,7 +785,7 @@ export default function QuizPage() {
 
                             return (
                               <div
-                                key={option}
+                                key={`${question.id}-${option}`}
                                 className={`flex items-center justify-between rounded-xl border p-4 text-sm ${optionStyle}`}
                               >
                                 <span className="font-medium">
@@ -834,6 +919,7 @@ export default function QuizPage() {
               {/* Action Buttons */}
               <div className="mt-8 flex flex-col justify-center gap-4 sm:flex-row">
                 <button
+                  type="button"
                   onClick={handleTryAgain}
                   className="rounded-xl border border-slate-200 bg-white px-6 py-3 font-semibold text-slate-700 transition hover:bg-slate-50"
                 >
