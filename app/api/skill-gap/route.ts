@@ -1,6 +1,15 @@
 import { NextResponse } from "next/server";
 
-const defaultCompetencies = [
+type Competency = {
+  id: number;
+  name: string;
+  category: string;
+  currentLevel: number;
+  targetLevel: number;
+  gap?: number;
+};
+
+const defaultCompetencies: Competency[] = [
   {
     id: 1,
     name: "Statistical Analysis",
@@ -45,10 +54,14 @@ const defaultCompetencies = [
   },
 ];
 
-export async function GET() {
+export async function GET(request: Request) {
   try {
+    // Get the current website origin dynamically.
+    // This works both locally and on Vercel.
+    const origin = new URL(request.url).origin;
+
     const competencyResponse = await fetch(
-      "http://localhost:3000/api/competency",
+      `${origin}/api/competency`,
       {
         cache: "no-store",
       }
@@ -58,20 +71,20 @@ export async function GET() {
       throw new Error("Failed to fetch competency data.");
     }
 
-    const competencyResult =
-      await competencyResponse.json();
+    const competencyResult = await competencyResponse.json();
 
-    const competencies = competencyResult.data;
+    if (
+      !competencyResult.success ||
+      !Array.isArray(competencyResult.data)
+    ) {
+      throw new Error("Invalid competency data received.");
+    }
+
+    const competencies: Competency[] =
+      competencyResult.data;
 
     const skillGaps = competencies.map(
-      (competency: {
-        id: number;
-        name: string;
-        category: string;
-        currentLevel: number;
-        targetLevel: number;
-        gap: number;
-      }) => ({
+      (competency: Competency) => ({
         id: competency.id,
         name: competency.name,
         category: competency.category,
@@ -88,8 +101,8 @@ export async function GET() {
     // Sort largest skill gap first
     skillGaps.sort(
       (
-        a: { gap: number },
-        b: { gap: number }
+        a: (typeof skillGaps)[number],
+        b: (typeof skillGaps)[number]
       ) => b.gap - a.gap
     );
 
@@ -104,19 +117,37 @@ export async function GET() {
       error
     );
 
+    const fallbackData = defaultCompetencies
+      .map((competency: Competency) => ({
+        id: competency.id,
+        name: competency.name,
+        category: competency.category,
+        currentLevel: competency.currentLevel,
+        targetLevel: competency.targetLevel,
+        gap: Math.max(
+          0,
+          competency.targetLevel -
+            competency.currentLevel
+        ),
+      }))
+      .sort(
+        (
+          a: {
+            gap: number;
+          },
+          b: {
+            gap: number;
+          }
+        ) => b.gap - a.gap
+      );
+
     return NextResponse.json(
       {
         success: false,
         message:
-          "Failed to generate skill gap analysis.",
-        data: defaultCompetencies.map(
-          (competency) => ({
-            ...competency,
-            gap:
-              competency.targetLevel -
-              competency.currentLevel,
-          })
-        ),
+          "Failed to generate dynamic skill gap analysis. Showing default competency data.",
+        total: fallbackData.length,
+        data: fallbackData,
       },
       {
         status: 500,
