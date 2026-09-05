@@ -1,14 +1,17 @@
 import { NextResponse } from "next/server";
 import Groq from "groq-sdk";
 
-// Import the actual PDF parser directly.
-// This avoids pdf-parse loading its internal test files during build.
+// Import PDF parser directly
 const pdf = require("pdf-parse/lib/pdf-parse.js");
 
 export const runtime = "nodejs";
-
-// Prevent this API route from being evaluated as static data
 export const dynamic = "force-dynamic";
+
+// Maximum allowed PDF size: 4 MB
+const MAX_FILE_SIZE = 4 * 1024 * 1024;
+
+// Maximum extracted characters sent to Groq
+const MAX_TEXT_LENGTH = 15000;
 
 // Allowed competency categories
 const ALLOWED_SKILLS = [
@@ -23,7 +26,7 @@ const ALLOWED_SKILLS = [
 
 type AllowedSkill = (typeof ALLOWED_SKILLS)[number];
 
-// Question type returned by AI
+// Question returned by AI
 type GeneratedQuestion = {
   skill?: string;
   question: string;
@@ -31,6 +34,7 @@ type GeneratedQuestion = {
   correctAnswer: string;
 };
 
+// Final validated question
 type QuizQuestion = {
   id: number;
   skill: AllowedSkill;
@@ -52,17 +56,34 @@ export async function POST(request: Request) {
     const formData = await request.formData();
     const file = formData.get("file");
 
+    // 2. Check if file exists
     if (!(file instanceof File)) {
       return NextResponse.json(
         {
           success: false,
           message: "No PDF file uploaded.",
         },
-        { status: 400 }
+        {
+          status: 400,
+        }
       );
     }
 
-    // 2. Validate PDF
+    // 3. Validate file size
+    if (file.size > MAX_FILE_SIZE) {
+      return NextResponse.json(
+        {
+          success: false,
+          message:
+            "PDF is too large. Please upload a PDF smaller than 4 MB.",
+        },
+        {
+          status: 413,
+        }
+      );
+    }
+
+    // 4. Validate PDF type
     const isPdf =
       file.type === "application/pdf" ||
       file.name.toLowerCase().endsWith(".pdf");
@@ -73,18 +94,24 @@ export async function POST(request: Request) {
           success: false,
           message: "Please upload a valid PDF file.",
         },
-        { status: 400 }
+        {
+          status: 400,
+        }
       );
     }
 
     console.log("PDF received:", file.name);
-    console.log("PDF size:", file.size);
+    console.log(
+      "PDF size:",
+      (file.size / 1024 / 1024).toFixed(2),
+      "MB"
+    );
 
-    // 3. Convert PDF to Buffer
+    // 5. Convert PDF to Buffer
     const arrayBuffer = await file.arrayBuffer();
     const buffer = Buffer.from(arrayBuffer);
 
-    // 4. Extract text from PDF
+    // 6. Extract text from PDF
     console.log("Extracting text from PDF...");
 
     const pdfData = await pdf(buffer);
@@ -95,7 +122,7 @@ export async function POST(request: Request) {
       extractedText?.length || 0
     );
 
-    // 5. Validate extracted text
+    // 7. Validate extracted text
     if (!extractedText || extractedText.trim().length < 50) {
       return NextResponse.json(
         {
@@ -103,11 +130,24 @@ export async function POST(request: Request) {
           message:
             "Could not extract enough text from this PDF. Please upload a text-based PDF.",
         },
-        { status: 400 }
+        {
+          status: 400,
+        }
       );
     }
 
-    // 6. Check Groq API key
+    // 8. Clean and limit PDF content
+    const content = extractedText
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, MAX_TEXT_LENGTH);
+
+    console.log(
+      "Characters sent to Groq:",
+      content.length
+    );
+
+    // 9. Check Groq API key
     const apiKey = process.env.GROQ_API_KEY;
 
     if (!apiKey) {
@@ -117,27 +157,24 @@ export async function POST(request: Request) {
           message:
             "GROQ_API_KEY is missing. Check your environment variables.",
         },
-        { status: 500 }
+        {
+          status: 500,
+        }
       );
     }
 
     console.log("Groq API key found.");
 
-    // 7. Initialize Groq
+    // 10. Initialize Groq
     const groq = new Groq({
       apiKey,
     });
 
-    // Limit PDF content
-    const content = extractedText.slice(0, 25000);
-
-    // 8. Create AI prompt
+    // 11. Create AI prompt
     const prompt = `
 You are an AI assessment generator for a learning platform called StatiqAI.
 
-Analyze the learning material extracted from the PDF below.
-
-Generate exactly 5 high-quality multiple-choice questions.
+Analyze the learning material below and generate exactly 5 high-quality multiple-choice questions.
 
 IMPORTANT SKILL CATEGORIES:
 
@@ -153,21 +190,21 @@ For every question, assign exactly ONE skill from this list:
 
 RULES:
 
-- Use ONLY information from the PDF content.
+- Use ONLY information from the provided learning material.
 - Generate exactly 5 questions.
 - Each question must have exactly 4 options.
 - Only ONE option must be correct.
 - The correctAnswer must exactly match one of the options.
-- Questions should test understanding of the learning material.
+- Questions should test understanding, not just memorization.
 - Assign the most relevant skill to every question.
-- The skill value MUST exactly match one of the skill categories provided above.
+- The skill value MUST exactly match one of the allowed skill categories.
 - If no specific category matches, use "General".
 - Do not include explanations.
 - Return ONLY valid JSON.
 - Do not use markdown.
 - Do not wrap the response in triple backticks.
 
-Return the response in exactly this format:
+Return exactly this JSON format:
 
 {
   "questions": [
@@ -185,41 +222,42 @@ Return the response in exactly this format:
   ]
 }
 
-PDF CONTENT:
+LEARNING MATERIAL:
 
 ${content}
 `;
 
-    console.log("Sending PDF content to Groq...");
+    console.log("Sending content to Groq...");
 
-    // 9. Generate quiz with Groq
-    const completion = await groq.chat.completions.create({
-      model: "openai/gpt-oss-20b",
+    // 12. Generate quiz using Groq
+    const completion =
+      await groq.chat.completions.create({
+        model: "openai/gpt-oss-20b",
 
-      messages: [
-        {
-          role: "system",
-          content:
-            "You are a precise AI assessment generator for StatiqAI. Return only valid JSON. Every question must include a skill field. The skill must be exactly one of: Statistical Analysis, Python, SQL & Databases, Data Visualization, AI & Machine Learning, Digital Governance, General.",
+        messages: [
+          {
+            role: "system",
+            content:
+              "You are a precise AI assessment generator for StatiqAI. Return only valid JSON. Every question must include a skill field. The skill must be exactly one of: Statistical Analysis, Python, SQL & Databases, Data Visualization, AI & Machine Learning, Digital Governance, General.",
+          },
+          {
+            role: "user",
+            content: prompt,
+          },
+        ],
+
+        temperature: 0.3,
+
+        max_completion_tokens: 3000,
+
+        response_format: {
+          type: "json_object",
         },
-        {
-          role: "user",
-          content: prompt,
-        },
-      ],
-
-      temperature: 0.3,
-
-      max_completion_tokens: 3000,
-
-      response_format: {
-        type: "json_object",
-      },
-    });
+      });
 
     console.log("Groq response received.");
 
-    // 10. Get AI response
+    // 13. Get AI response
     const responseText =
       completion.choices[0]?.message?.content;
 
@@ -231,13 +269,13 @@ ${content}
 
     console.log("Raw Groq response:", responseText);
 
-    // 11. Clean response
+    // 14. Clean AI response
     const cleanedText = responseText
       .replace(/```json/gi, "")
       .replace(/```/g, "")
       .trim();
 
-    // 12. Parse JSON
+    // 15. Parse JSON
     let generatedData: {
       questions: GeneratedQuestion[];
     };
@@ -260,7 +298,7 @@ ${content}
       );
     }
 
-    // 13. Validate AI response
+    // 16. Validate question structure
     if (
       !generatedData.questions ||
       !Array.isArray(generatedData.questions)
@@ -270,25 +308,24 @@ ${content}
       );
     }
 
-    // Must receive exactly 5 questions
+    // Must receive at least 5 questions
     if (generatedData.questions.length < 5) {
       throw new Error(
         `Expected 5 questions but received ${generatedData.questions.length}.`
       );
     }
 
-    // Use only the first 5 questions
+    // Use only first 5 questions
     const generatedQuestions =
       generatedData.questions.slice(0, 5);
 
-    // 14. Validate and add IDs
+    // 17. Validate questions and add IDs
     const questions: QuizQuestion[] =
       generatedQuestions.map(
         (
           question: GeneratedQuestion,
           index: number
         ) => {
-          // Validate question format
           if (
             !question.question ||
             typeof question.question !== "string" ||
@@ -302,7 +339,7 @@ ${content}
             );
           }
 
-          // Make sure every option is valid
+          // Validate all options
           const validOptions =
             question.options.every(
               (option) =>
@@ -312,14 +349,24 @@ ${content}
 
           if (!validOptions) {
             throw new Error(
-              `Question ${index + 1} contains invalid options.`
+              `Question ${
+                index + 1
+              } contains invalid options.`
             );
           }
 
-          // Make sure correct answer matches an option
+          const cleanedOptions =
+            question.options.map((option) =>
+              option.trim()
+            );
+
+          const cleanedCorrectAnswer =
+            question.correctAnswer.trim();
+
+          // Validate correct answer
           if (
-            !question.options.includes(
-              question.correctAnswer
+            !cleanedOptions.includes(
+              cleanedCorrectAnswer
             )
           ) {
             throw new Error(
@@ -329,11 +376,10 @@ ${content}
             );
           }
 
-          // Use AI skill or General as fallback
+          // Validate skill
           const receivedSkill =
             question.skill?.trim() || "General";
 
-          // Validate skill
           const skill: AllowedSkill =
             ALLOWED_SKILLS.includes(
               receivedSkill as AllowedSkill
@@ -341,7 +387,10 @@ ${content}
               ? (receivedSkill as AllowedSkill)
               : "General";
 
-          if (skill === "General" && receivedSkill !== "General") {
+          if (
+            skill === "General" &&
+            receivedSkill !== "General"
+          ) {
             console.warn(
               `Invalid skill "${receivedSkill}" in question ${
                 index + 1
@@ -353,16 +402,14 @@ ${content}
             id: index + 1,
             skill,
             question: question.question.trim(),
-            options: question.options.map(
-              (option) => option.trim()
-            ),
+            options: cleanedOptions,
             correctAnswer:
-              question.correctAnswer.trim(),
+              cleanedCorrectAnswer,
           };
         }
       );
 
-    // 15. Final safety check
+    // 18. Final validation
     if (questions.length !== 5) {
       throw new Error(
         `Expected exactly 5 questions but received ${questions.length}.`
@@ -370,14 +417,22 @@ ${content}
     }
 
     console.log("Quiz generated successfully!");
-    console.log("Generated questions:", questions);
+    console.log(
+      "Generated questions:",
+      questions
+    );
 
-    // 16. Return quiz
+    // 19. Return quiz
     return NextResponse.json({
       success: true,
       total: questions.length,
       data: questions,
-      extractedCharacters: extractedText.length,
+
+      extractedCharacters:
+        extractedText.length,
+
+      analyzedCharacters:
+        content.length,
     });
   } catch (error: unknown) {
     console.error(
@@ -392,13 +447,14 @@ ${content}
       message = error.message;
     }
 
+    // Handle Groq/API errors
     if (
       typeof error === "object" &&
       error !== null &&
       "status" in error
     ) {
       console.error(
-        "Groq API error status:",
+        "API error status:",
         error.status
       );
     }
