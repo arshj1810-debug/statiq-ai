@@ -1,9 +1,14 @@
 import { NextResponse } from "next/server";
 import Groq from "groq-sdk";
 
+// Import the actual PDF parser directly.
+// This avoids pdf-parse loading its internal test files during build.
 const pdf = require("pdf-parse/lib/pdf-parse.js");
 
 export const runtime = "nodejs";
+
+// Prevent this API route from being evaluated as static data
+export const dynamic = "force-dynamic";
 
 // Allowed competency categories
 const ALLOWED_SKILLS = [
@@ -14,7 +19,9 @@ const ALLOWED_SKILLS = [
   "AI & Machine Learning",
   "Digital Governance",
   "General",
-];
+] as const;
+
+type AllowedSkill = (typeof ALLOWED_SKILLS)[number];
 
 // Question type returned by AI
 type GeneratedQuestion = {
@@ -23,6 +30,21 @@ type GeneratedQuestion = {
   options: string[];
   correctAnswer: string;
 };
+
+type QuizQuestion = {
+  id: number;
+  skill: AllowedSkill;
+  question: string;
+  options: string[];
+  correctAnswer: string;
+};
+
+export async function GET() {
+  return NextResponse.json({
+    success: true,
+    message: "Quiz generation API is ready. Use POST to upload a PDF.",
+  });
+}
 
 export async function POST(request: Request) {
   try {
@@ -93,7 +115,7 @@ export async function POST(request: Request) {
         {
           success: false,
           message:
-            "GROQ_API_KEY is missing. Check your .env.local file.",
+            "GROQ_API_KEY is missing. Check your environment variables.",
         },
         { status: 500 }
       );
@@ -178,7 +200,7 @@ ${content}
         {
           role: "system",
           content:
-            "You are a precise AI assessment generator for StatiqAI. Return only valid JSON. Every question should include a skill field. The skill must be exactly one of: Statistical Analysis, Python, SQL & Databases, Data Visualization, AI & Machine Learning, Digital Governance, General.",
+            "You are a precise AI assessment generator for StatiqAI. Return only valid JSON. Every question must include a skill field. The skill must be exactly one of: Statistical Analysis, Python, SQL & Databases, Data Visualization, AI & Machine Learning, Digital Governance, General.",
         },
         {
           role: "user",
@@ -238,7 +260,7 @@ ${content}
       );
     }
 
-    // 13. Validate response
+    // 13. Validate AI response
     if (
       !generatedData.questions ||
       !Array.isArray(generatedData.questions)
@@ -248,63 +270,99 @@ ${content}
       );
     }
 
-    // Make sure we use only 5 questions
+    // Must receive exactly 5 questions
+    if (generatedData.questions.length < 5) {
+      throw new Error(
+        `Expected 5 questions but received ${generatedData.questions.length}.`
+      );
+    }
+
+    // Use only the first 5 questions
     const generatedQuestions =
       generatedData.questions.slice(0, 5);
 
     // 14. Validate and add IDs
-    const questions = generatedQuestions.map(
-      (question: GeneratedQuestion, index: number) => {
-        // Validate question format
-        if (
-          !question.question ||
-          !Array.isArray(question.options) ||
-          question.options.length !== 4 ||
-          !question.correctAnswer
-        ) {
-          throw new Error(
-            `Invalid format in question ${index + 1}.`
-          );
+    const questions: QuizQuestion[] =
+      generatedQuestions.map(
+        (
+          question: GeneratedQuestion,
+          index: number
+        ) => {
+          // Validate question format
+          if (
+            !question.question ||
+            typeof question.question !== "string" ||
+            !Array.isArray(question.options) ||
+            question.options.length !== 4 ||
+            !question.correctAnswer ||
+            typeof question.correctAnswer !== "string"
+          ) {
+            throw new Error(
+              `Invalid format in question ${index + 1}.`
+            );
+          }
+
+          // Make sure every option is valid
+          const validOptions =
+            question.options.every(
+              (option) =>
+                typeof option === "string" &&
+                option.trim().length > 0
+            );
+
+          if (!validOptions) {
+            throw new Error(
+              `Question ${index + 1} contains invalid options.`
+            );
+          }
+
+          // Make sure correct answer matches an option
+          if (
+            !question.options.includes(
+              question.correctAnswer
+            )
+          ) {
+            throw new Error(
+              `Correct answer does not match an option in question ${
+                index + 1
+              }.`
+            );
+          }
+
+          // Use AI skill or General as fallback
+          const receivedSkill =
+            question.skill?.trim() || "General";
+
+          // Validate skill
+          const skill: AllowedSkill =
+            ALLOWED_SKILLS.includes(
+              receivedSkill as AllowedSkill
+            )
+              ? (receivedSkill as AllowedSkill)
+              : "General";
+
+          if (skill === "General" && receivedSkill !== "General") {
+            console.warn(
+              `Invalid skill "${receivedSkill}" in question ${
+                index + 1
+              }. Using General instead.`
+            );
+          }
+
+          return {
+            id: index + 1,
+            skill,
+            question: question.question.trim(),
+            options: question.options.map(
+              (option) => option.trim()
+            ),
+            correctAnswer:
+              question.correctAnswer.trim(),
+          };
         }
+      );
 
-        // Make sure correct answer matches one option
-        if (
-          !question.options.includes(
-            question.correctAnswer
-          )
-        ) {
-          throw new Error(
-            `Correct answer does not match an option in question ${
-              index + 1
-            }.`
-          );
-        }
-
-        // Use AI skill or General as fallback
-        let skill = question.skill?.trim() || "General";
-
-        // Safety check: only allow defined competency categories
-        if (!ALLOWED_SKILLS.includes(skill)) {
-          console.warn(
-            `Invalid skill "${skill}" in question ${
-              index + 1
-            }. Using "General" instead.`
-          );
-
-          skill = "General";
-        }
-
-        return {
-          id: index + 1,
-          skill,
-          question: question.question,
-          options: question.options,
-          correctAnswer: question.correctAnswer,
-        };
-      }
-    );
-
-    // 15. Ensure exactly 5 questions
+    // 15. Final safety check
     if (questions.length !== 5) {
       throw new Error(
         `Expected exactly 5 questions but received ${questions.length}.`
