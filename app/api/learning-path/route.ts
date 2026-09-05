@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
 type SkillGap = {
   id: number;
@@ -17,10 +17,7 @@ type LearningModule = {
   duration: string;
 };
 
-const learningResources: Record<
-  string,
-  LearningModule[]
-> = {
+const learningResources: Record<string, LearningModule[]> = {
   "Statistical Analysis": [
     {
       id: 1,
@@ -136,11 +133,26 @@ const learningResources: Record<
   ],
 };
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   try {
-    // Get dynamic skill-gap data
+    // Get the current website URL dynamically.
+    // This works both locally and after deployment on Vercel.
+    const host = request.headers.get("host");
+
+    if (!host) {
+      throw new Error("Unable to determine application host.");
+    }
+
+    const protocol =
+      process.env.NODE_ENV === "development"
+        ? "http"
+        : "https";
+
+    const baseUrl = `${protocol}://${host}`;
+
+    // Fetch dynamic skill gap data
     const skillGapResponse = await fetch(
-      "http://localhost:3000/api/skill-gap",
+      `${baseUrl}/api/skill-gap`,
       {
         cache: "no-store",
       }
@@ -156,9 +168,11 @@ export async function GET() {
       await skillGapResponse.json();
 
     const skillGaps: SkillGap[] =
-      skillGapResult.data || [];
+      Array.isArray(skillGapResult.data)
+        ? skillGapResult.data
+        : [];
 
-    // Only include skills that actually have a gap
+    // Only include skills with a gap
     const prioritySkills = skillGaps
       .filter((skill) => skill.gap > 0)
       .sort((a, b) => b.gap - a.gap);
